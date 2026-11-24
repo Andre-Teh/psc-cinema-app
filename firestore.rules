@@ -1,0 +1,113 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // The signed-in user's own Client profile, used to look up their role.
+    // 'position' is one of 'admin' | 'manager' | 'customer' (see lib/signup.dart).
+    function callerRole() {
+      return get(/databases/$(database)/documents/Client/$(request.auth.uid)).data.position;
+    }
+
+    function isStaff() {
+      return isSignedIn() && callerRole() in ['admin', 'manager'];
+    }
+
+    function isAdmin() {
+      return isSignedIn() && callerRole() == 'admin';
+    }
+
+    // ---- User profiles (lib/login.dart, signup.dart, profile_screen.dart,
+    // membership_screen.dart, admin/client_data.dart) ----
+    match /Client/{uid} {
+      allow read: if isOwner(uid) || isStaff();
+
+      // Covers both self-signup and admin-created accounts: in both cases
+      // the Firestore write happens as the newly-created user (the app uses
+      // the client SDK, not the Admin SDK, so creating a user signs the
+      // caller in as them) writing their own doc.
+      allow create: if isOwner(uid);
+
+      // Users may edit their own profile but not change their own role.
+      // Staff (admin/manager) may edit any profile, including role, to
+      // support the admin "manage clients" screen.
+      allow update: if isStaff()
+        || (isOwner(uid) && request.resource.data.position == resource.data.position);
+
+      // Only admins can delete accounts (admin/client_data.dart).
+      allow delete: if isAdmin();
+    }
+
+    // ---- Movie catalog: everyone signed in can browse, only staff manage it
+    // (lib/manager/addfilm.dart, editfilm.dart, filmList.dart, home_screen.dart,
+    // movies_screen/*, shcedule_view.dart) ----
+    match /films/{filmId} {
+      allow read: if isSignedIn();
+      allow write: if isStaff();
+    }
+
+    // ---- Food & drinks catalog (lib/screens/movies_screen/food&drinks_screen.dart
+    // reads; lib/manager/foodandbeveragesstore.dart, foodandbevup.dart,
+    // foodandbev_edit_and_delete.dart manage) ----
+    match /Food/{itemId} {
+      allow read: if isSignedIn();
+      allow write: if isStaff();
+    }
+    match /Beverages/{itemId} {
+      allow read: if isSignedIn();
+      allow write: if isStaff();
+    }
+    match /FandBPackage/{itemId} {
+      allow read: if isSignedIn();
+      allow write: if isStaff();
+    }
+
+    // ---- Payment method configuration, admin-managed
+    // (lib/admin/bank_type_screen.dart, e-wallettype.dart; read in payment_screen.dart) ----
+    match /Bank_Type/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+    match /e-wallet/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // ---- Bookings (lib/screens/movies_screen/checkout_screen.dart creates,
+    // tagged with the booking owner's uid; payment_screen.dart marks the
+    // owner's own order PAID; my_booking_screen.dart queries 'where uid ==';
+    // manager reports and admin/order_data_screen.dart need full access) ----
+    match /order_data/{orderId} {
+      allow read: if isSignedIn() && (isStaff() || resource.data.uid == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+      allow update: if isSignedIn() && (isStaff() || resource.data.uid == request.auth.uid);
+      allow delete: if isStaff();
+    }
+
+    // ---- Payment records (lib/screens/payment_screen.dart creates one per
+    // order; lib/admin/payment_data_screen.dart and src/EarnMoneychart.dart
+    // (manager reporting) read/manage them). Payment_Data has no uid field of
+    // its own, so creation is tied back to the order it pays for. ----
+    match /Payment_Data/{paymentId} {
+      allow create: if isSignedIn() &&
+        get(/databases/$(database)/documents/order_data/$(request.resource.data.OrderID)).data.uid == request.auth.uid;
+      allow read, update, delete: if isStaff();
+    }
+
+    // ---- QR ticket check-in (lib/src/qrgenerator.dart, qrupdate.dart) ----
+    // Not currently wired into app navigation, but modeled as a staff-only
+    // check-in tool consistent with its "scan ticket, mark used" purpose.
+    match /orders/{orderId} {
+      allow read, write: if isStaff();
+    }
+
+    // Everything else is denied by default.
+  }
+}
